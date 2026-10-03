@@ -1,6 +1,6 @@
 # FPGA_LAB2
 
-##2026/10/03 陳冠亦
+## 2026/10/03 陳冠亦
 
 目前完成 AXI UART Lite wrapper 初版：
 
