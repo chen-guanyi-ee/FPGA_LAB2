@@ -8,28 +8,20 @@ module Rsa256Wrapper (
 );
 
 //AXI command
-localparam	AXI_IDLE 	        = 2'b00;
-localparam	AXI_R		        = 2'b10;
-localparam	AXI_W		        = 2'b01;
-
 localparam   RX_BASE             = 0*4;
 localparam   TX_BASE             = 1*4;
 localparam   STATUS_BASE         = 2*4;
-localparam   CTRL_BASE           = 3*4;
 
 localparam   RX_OK_BIT           = 0;
 localparam   TX_FULL_BIT         = 3;
 
-localparam   S_STATUS_ADDR       = 4'd0;
-localparam   S_STATUS_DATA       = 4'd1;
-localparam   S_RX_ADDR           = 4'd2;
-localparam   S_RX_DATA           = 4'd3;
-localparam   S_WAIT_CALC         = 4'd4;
-localparam   S_TX_STATUS_ADDR    = 4'd5;
-localparam   S_TX_STATUS_DATA    = 4'd6;
-localparam   S_TX_DATA           = 4'd7;
-localparam   S_TX_RESP           = 4'd8;
-localparam   S_FINISH            = 4'd9;
+localparam logic [2:0] S_STATUS_ADDR = 3'd0;
+localparam logic [2:0] S_STATUS_DATA = 3'd1;
+localparam logic [2:0] S_RX_ADDR     = 3'd2;
+localparam logic [2:0] S_RX_DATA_HOLD= 3'd3;
+localparam logic [2:0] S_MUL_ADD     = 3'd4;
+localparam logic [2:0] S_MUL_SUB     = 3'd5;
+localparam logic [2:0] S_TX_DATA     = 3'd6;
 
 /********************************************************
     Input buffer: N || d || y
@@ -37,8 +29,7 @@ localparam   S_FINISH            = 4'd9;
 logic [767:0] ndy_r;
 logic [6:0] byte_seq_r;
 logic [255:0] m;
-logic finish_r;
-logic finish_calc;
+(* fsm_encoding = "sequential" *) logic [2:0] state_r;
 
 /********************************************************
     RSA core control
@@ -54,29 +45,16 @@ logic finish_calc;
     two operands and m itself is cleared and used as the
     partial sum.  There is no separate 256-bit accumulator.
 **********************************************************/
-localparam logic [3:0] C_IDLE      = 4'd0;
-localparam logic [3:0] C_ROUND     = 4'd1;
-localparam logic [3:0] C_START_SQ  = 4'd2;
-localparam logic [3:0] C_START_MUL = 4'd3;
-localparam logic [3:0] C_MUL_ADD   = 4'd4;
-localparam logic [3:0] C_MUL_SUB   = 4'd5;
-localparam logic [3:0] C_MUL_DONE  = 4'd6;
-localparam logic [3:0] C_DONE      = 4'd7;
-localparam logic [3:0] C_HOLD      = 4'd8;
-
 // LFSR values immediately before operation 32 and 256.
 localparam logic [5:0] C_BYTE_LAST = 6'h24;
 localparam logic [8:0] C_BIT_LAST  = 9'h150;
 
-logic [3:0] core_state_r;
 logic [255:0] a_r, b_r;
 logic [5:0] core_byte_seq_r;
 logic [8:0] mul_seq_r, round_seq_r;
 logic mul_by_y_r;
-logic add_carry_m_r, add_carry_b_r;
-logic sub_carry_m_r, sub_carry_b_r;
+logic carry_m_r, carry_b_r;
 logic ge_m_r, ge_b_r;
-logic need_sub_m_r, need_sub_b_r;
 logic lane_b_r; // 0: operate on m, 1: operate on B
 
 function automatic logic [5:0] core_lfsr6_next(input logic [5:0] q);
@@ -87,29 +65,16 @@ function automatic logic [8:0] core_lfsr9_next(input logic [8:0] q);
     core_lfsr9_next = {q[7:0], q[8] ^ q[4]};
 endfunction
 
-logic [8:0] adder_lhs, adder_rhs;
-logic adder_cin;
-
-always_comb begin
-    adder_lhs = lane_b_r ? {1'b0, b_r[7:0]} :
-                           {1'b0, m[7:0]};
-    if (core_state_r == C_MUL_SUB) begin
-        adder_rhs = {1'b0, ~ndy_r[519:512]};
-        adder_cin = lane_b_r ? sub_carry_b_r : sub_carry_m_r;
-    end else begin
-        adder_rhs = lane_b_r ? {1'b0, b_r[7:0]} :
-                    (a_r[0] ? {1'b0, b_r[7:0]} : 9'd0);
-        adder_cin = lane_b_r ? add_carry_b_r : add_carry_m_r;
-    end
-end
-
 // One byte-wide carry chain and comparator are time-shared by m and B.
-wire [8:0] byte_sum = adder_lhs + adder_rhs + adder_cin;
+wire [8:0] byte_sum =
+    (lane_b_r ? {1'b0, b_r[7:0]} : {1'b0, m[7:0]}) +
+    ((state_r == S_MUL_SUB) ? {1'b0, ~ndy_r[519:512]} :
+     lane_b_r ? {1'b0, b_r[7:0]} :
+     a_r[0] ? {1'b0, b_r[7:0]} : 9'd0) +
+    (lane_b_r ? carry_b_r : carry_m_r);
 wire ge_lane_next = (byte_sum[7:0] > ndy_r[519:512]) ? 1'b1 :
                     (byte_sum[7:0] < ndy_r[519:512]) ? 1'b0 :
                     (lane_b_r ? ge_b_r : ge_m_r);
-
-assign finish_calc = (core_state_r == C_DONE);
 
 /********************************************************
     UART
@@ -122,10 +87,6 @@ logic           s_axi_awready;
 logic[31:0]     s_axi_wdata;
 logic           s_axi_wvalid;
 logic           s_axi_wready;
-//write response
-logic[1:0]      s_axi_bresp;
-logic           s_axi_bvalid;
-logic           s_axi_bready;
 //read address
 logic[3:0]     	s_axi_araddr  ;  //input 	master read address
 logic         	s_axi_arvalid ;  //input    master read address valid
@@ -147,14 +108,14 @@ axi_uartlite_0 uart
   .s_axi_wstrb(4'b1111),
   .s_axi_wvalid(s_axi_wvalid),
   .s_axi_wready(s_axi_wready),
-  .s_axi_bresp(s_axi_bresp),
-  .s_axi_bvalid(s_axi_bvalid),
-  .s_axi_bready(s_axi_bready),
+  .s_axi_bresp(),                 // response code is intentionally ignored
+  .s_axi_bvalid(),                // response valid is intentionally ignored
+  .s_axi_bready(1'b1),            // always consume write responses
   .s_axi_araddr(s_axi_araddr),    // input logic [3 : 0] s_axi_araddr
   .s_axi_arvalid(s_axi_arvalid),  // input logic s_axi_arvalid
   .s_axi_arready(s_axi_arready),  // output logic s_axi_arready
   .s_axi_rdata(s_axi_rdata),      // output logic [31 : 0] s_axi_rdata
-  .s_axi_rresp(s_axi_rresp),      // output logic [1 : 0] s_axi_rresp
+  .s_axi_rresp(),                 // response code is intentionally ignored
   .s_axi_rvalid(s_axi_rvalid),    // output logic s_axi_rvalid
   .s_axi_rready(s_axi_rready),    // input logic s_axi_rready
   .rx(rx),                        // input logic rx
@@ -162,7 +123,6 @@ axi_uartlite_0 uart
 ); 
 
 
-logic [3:0] state_r;
 logic aw_done_r, w_done_r;
 
 // These are combinational AXI wires, not flip-flops.
@@ -170,26 +130,21 @@ assign s_axi_awaddr  = TX_BASE;
 assign s_axi_awvalid = (state_r == S_TX_DATA) && !aw_done_r;
 assign s_axi_wdata   = {24'b0, m[247:240]};
 assign s_axi_wvalid  = (state_r == S_TX_DATA) && !w_done_r;
-assign s_axi_bready  = (state_r == S_TX_RESP);
 
 assign s_axi_araddr  = (state_r == S_RX_ADDR) ? RX_BASE : STATUS_BASE;
 assign s_axi_arvalid = (state_r == S_STATUS_ADDR) ||
-                       (state_r == S_RX_ADDR) ||
-                       (state_r == S_TX_STATUS_ADDR);
+                       (state_r == S_RX_ADDR);
 assign s_axi_rready  = (state_r == S_STATUS_DATA) ||
-                       (state_r == S_RX_DATA) ||
-                       (state_r == S_TX_STATUS_DATA);
+                       ((state_r == S_RX_DATA_HOLD) && !mul_by_y_r);
 
 always_ff @(posedge i_clk or posedge i_rst) begin
     if (i_rst) begin
         ndy_r      <= 768'b0;
         byte_seq_r <= 7'h01;
-        finish_r   <= 1'b0;
         state_r    <= S_STATUS_ADDR;
         aw_done_r  <= 1'b0;
         w_done_r   <= 1'b0;
 
-        core_state_r     <= C_IDLE;
         m                <= 256'b0;
         a_r              <= 256'b0;
         b_r              <= 256'b0;
@@ -197,14 +152,10 @@ always_ff @(posedge i_clk or posedge i_rst) begin
         mul_seq_r        <= 9'h001;
         round_seq_r      <= 9'h001;
         mul_by_y_r       <= 1'b0;
-        add_carry_m_r    <= 1'b0;
-        add_carry_b_r    <= 1'b0;
-        sub_carry_m_r    <= 1'b1;
-        sub_carry_b_r    <= 1'b1;
+        carry_m_r        <= 1'b0;
+        carry_b_r        <= 1'b0;
         ge_m_r           <= 1'b1;
         ge_b_r           <= 1'b1;
-        need_sub_m_r     <= 1'b0;
-        need_sub_b_r     <= 1'b0;
         lane_b_r         <= 1'b0;
     end else begin
         case (state_r)
@@ -214,23 +165,46 @@ always_ff @(posedge i_clk or posedge i_rst) begin
             end
 
             S_STATUS_DATA: begin
-                if (s_axi_rvalid)
-                    state_r <= s_axi_rdata[RX_OK_BIT] ? S_RX_ADDR : S_STATUS_ADDR;
+                if (s_axi_rvalid) begin
+                    if (!mul_by_y_r) begin
+                        state_r <= s_axi_rdata[RX_OK_BIT] ?
+                                   S_RX_ADDR : S_STATUS_ADDR;
+                    end else if (s_axi_rdata[TX_FULL_BIT]) begin
+                        state_r <= S_STATUS_ADDR;
+                    end else begin
+                        aw_done_r <= 1'b0;
+                        w_done_r  <= 1'b0;
+                        state_r   <= S_TX_DATA;
+                    end
+                end
             end
 
             S_RX_ADDR: begin
                 if (s_axi_arready)
-                    state_r <= S_RX_DATA;
+                    state_r <= S_RX_DATA_HOLD;
             end
 
-            S_RX_DATA: begin
-                if (s_axi_rvalid) begin
+            S_RX_DATA_HOLD: begin
+                // mul_by_y=1 after calculation makes this the final hold.
+                if (!mul_by_y_r && s_axi_rvalid) begin
                     ndy_r <= {ndy_r[759:0], s_axi_rdata[7:0]};
 
                     // 7-bit LFSR sequence, value 7'h25 occurs before byte 96.
                     if (byte_seq_r == 7'h25) begin
-                        finish_r <= 1'b1;
-                        state_r  <= S_WAIT_CALC;
+                        // Start the first square (1 * 1) directly.
+                        a_r             <= 256'd1;
+                        b_r             <= 256'd1;
+                        m               <= 256'b0;
+                        round_seq_r     <= 9'h001;
+                        mul_seq_r       <= 9'h001;
+                        core_byte_seq_r <= 6'h01;
+                        mul_by_y_r      <= 1'b0;
+                        carry_m_r       <= 1'b0;
+                        carry_b_r       <= 1'b0;
+                        ge_m_r          <= 1'b1;
+                        ge_b_r          <= 1'b1;
+                        lane_b_r        <= 1'b0;
+                        state_r         <= S_MUL_ADD;
                     end else begin
                         byte_seq_r <= {byte_seq_r[5:0],
                                        byte_seq_r[6] ^ byte_seq_r[5]};
@@ -239,26 +213,145 @@ always_ff @(posedge i_clk or posedge i_rst) begin
                 end
             end
 
-            S_WAIT_CALC: begin
-                if (finish_calc) begin
-                    byte_seq_r   <= 7'h01;
-                    state_r      <= S_TX_STATUS_ADDR;
+            S_MUL_ADD: begin
+                // One shared adder: m lane first, B lane second.
+                if (!lane_b_r) begin
+                    m <= {byte_sum[7:0], m[255:8]};
+                    carry_m_r <= byte_sum[8];
+                    ge_m_r <= ge_lane_next;
+                    lane_b_r <= 1'b1;
+                end else begin
+                    b_r <= {byte_sum[7:0], b_r[255:8]};
+                    ndy_r[767:512] <=
+                        {ndy_r[519:512], ndy_r[767:520]};
+                    carry_b_r <= byte_sum[8];
+                    ge_b_r <= ge_lane_next;
+                    lane_b_r <= 1'b0;
+
+                    if (core_byte_seq_r == C_BYTE_LAST) begin
+                        core_byte_seq_r <= 6'h01;
+
+                        if ((carry_m_r | ge_m_r) ||
+                            (byte_sum[8] | ge_lane_next)) begin
+                            // During SUB, ge_m/ge_b become the subtract enables.
+                            ge_m_r <= carry_m_r | ge_m_r;
+                            ge_b_r <= byte_sum[8] | ge_lane_next;
+                            carry_m_r <= 1'b1;
+                            carry_b_r <= 1'b1;
+                            state_r <= S_MUL_SUB;
+                        end else if (mul_seq_r != C_BIT_LAST) begin
+                            a_r <= {1'b0, a_r[255:1]};
+                            mul_seq_r <= core_lfsr9_next(mul_seq_r);
+                            carry_m_r <= 1'b0;
+                            carry_b_r <= 1'b0;
+                            ge_m_r <= 1'b1;
+                            ge_b_r <= 1'b1;
+                        end else if (!mul_by_y_r && ndy_r[511]) begin
+                            // Square complete; multiply by y for a one bit.
+                            a_r             <= m;
+                            b_r             <= ndy_r[255:0];
+                            m               <= 256'b0;
+                            mul_seq_r       <= 9'h001;
+                            core_byte_seq_r <= 6'h01;
+                            mul_by_y_r      <= 1'b1;
+                            carry_m_r       <= 1'b0;
+                            carry_b_r       <= 1'b0;
+                            ge_m_r          <= 1'b1;
+                            ge_b_r          <= 1'b1;
+                            lane_b_r        <= 1'b0;
+                        end else if (round_seq_r == C_BIT_LAST) begin
+                            byte_seq_r <= 7'h01;
+                            mul_by_y_r <= 1'b1;
+                            state_r <= S_STATUS_ADDR;
+                        end else begin
+                            ndy_r[511:256] <=
+                                {ndy_r[510:256], 1'b0};
+                            a_r             <= m;
+                            b_r             <= m;
+                            m               <= 256'b0;
+                            round_seq_r     <= core_lfsr9_next(round_seq_r);
+                            mul_seq_r       <= 9'h001;
+                            core_byte_seq_r <= 6'h01;
+                            mul_by_y_r      <= 1'b0;
+                            carry_m_r       <= 1'b0;
+                            carry_b_r       <= 1'b0;
+                            ge_m_r          <= 1'b1;
+                            ge_b_r          <= 1'b1;
+                            lane_b_r        <= 1'b0;
+                        end
+                    end else begin
+                        core_byte_seq_r <=
+                            core_lfsr6_next(core_byte_seq_r);
+                    end
                 end
             end
 
-            S_TX_STATUS_ADDR: begin
-                if (s_axi_arready)
-                    state_r <= S_TX_STATUS_DATA;
-            end
+            S_MUL_SUB: begin
+                // The same adder performs m-N and B-N in two phases.
+                if (!lane_b_r) begin
+                    m <= ge_m_r ?
+                         {byte_sum[7:0], m[255:8]} :
+                         {m[7:0], m[255:8]};
+                    if (ge_m_r)
+                        carry_m_r <= byte_sum[8];
+                    lane_b_r <= 1'b1;
+                end else begin
+                    b_r <= ge_b_r ?
+                           {byte_sum[7:0], b_r[255:8]} :
+                           {b_r[7:0], b_r[255:8]};
+                    ndy_r[767:512] <=
+                        {ndy_r[519:512], ndy_r[767:520]};
+                    if (ge_b_r)
+                        carry_b_r <= byte_sum[8];
+                    lane_b_r <= 1'b0;
 
-            S_TX_STATUS_DATA: begin
-                if (s_axi_rvalid) begin
-                    if (s_axi_rdata[TX_FULL_BIT]) begin
-                        state_r <= S_TX_STATUS_ADDR;
+                    if (core_byte_seq_r == C_BYTE_LAST) begin
+                        core_byte_seq_r <= 6'h01;
+                        if (mul_seq_r != C_BIT_LAST) begin
+                            a_r <= {1'b0, a_r[255:1]};
+                            mul_seq_r <= core_lfsr9_next(mul_seq_r);
+                            carry_m_r <= 1'b0;
+                            carry_b_r <= 1'b0;
+                            ge_m_r <= 1'b1;
+                            ge_b_r <= 1'b1;
+                            state_r <= S_MUL_ADD;
+                        end else if (!mul_by_y_r && ndy_r[511]) begin
+                            a_r             <= m;
+                            b_r             <= ndy_r[255:0];
+                            m               <= 256'b0;
+                            mul_seq_r       <= 9'h001;
+                            core_byte_seq_r <= 6'h01;
+                            mul_by_y_r      <= 1'b1;
+                            carry_m_r       <= 1'b0;
+                            carry_b_r       <= 1'b0;
+                            ge_m_r          <= 1'b1;
+                            ge_b_r          <= 1'b1;
+                            lane_b_r        <= 1'b0;
+                            state_r         <= S_MUL_ADD;
+                        end else if (round_seq_r == C_BIT_LAST) begin
+                            byte_seq_r <= 7'h01;
+                            mul_by_y_r <= 1'b1;
+                            state_r <= S_STATUS_ADDR;
+                        end else begin
+                            ndy_r[511:256] <=
+                                {ndy_r[510:256], 1'b0};
+                            a_r             <= m;
+                            b_r             <= m;
+                            m               <= 256'b0;
+                            round_seq_r     <= core_lfsr9_next(round_seq_r);
+                            mul_seq_r       <= 9'h001;
+                            core_byte_seq_r <= 6'h01;
+                            mul_by_y_r      <= 1'b0;
+                            carry_m_r       <= 1'b0;
+                            carry_b_r       <= 1'b0;
+                            ge_m_r          <= 1'b1;
+                            ge_b_r          <= 1'b1;
+                            lane_b_r        <= 1'b0;
+                            state_r         <= S_MUL_ADD;
+                        end
                     end else begin
-                        aw_done_r <= 1'b0;
-                        w_done_r  <= 1'b0;
-                        state_r   <= S_TX_DATA;
+                        core_byte_seq_r <=
+                            core_lfsr6_next(core_byte_seq_r);
                     end
                 end
             end
@@ -270,187 +363,27 @@ always_ff @(posedge i_clk or posedge i_rst) begin
                     w_done_r <= 1'b1;
 
                 if ((aw_done_r || s_axi_awready) &&
-                    (w_done_r || s_axi_wready))
-                    state_r <= S_TX_RESP;
-            end
-
-            S_TX_RESP: begin
-                if (s_axi_bvalid) begin
+                    (w_done_r || s_axi_wready)) begin
+                    // UART Lite has captured this byte; its write response
+                    // is accepted independently by the constant BREADY.
                     m <= {m[247:0], 8'b0};
 
                     // The same LFSR value 7'h45 occurs before byte 31.
                     if (byte_seq_r == 7'h45) begin
-                        state_r <= S_FINISH;
+                        state_r <= S_RX_DATA_HOLD;
                     end else begin
                         byte_seq_r <= {byte_seq_r[5:0],
                                        byte_seq_r[6] ^ byte_seq_r[5]};
-                        state_r <= S_TX_STATUS_ADDR;
+                        state_r <= S_STATUS_ADDR;
                     end
                 end
             end
 
-            default: state_r <= S_FINISH;
+            default: state_r <= S_STATUS_ADDR;
         endcase
 
-        case (core_state_r)
-            C_IDLE: begin
-                if (finish_r) begin
-                    m           <= 256'd1;
-                    round_seq_r <= 9'h001;
-                    core_state_r <= C_ROUND;
-                end
-            end
-
-            C_ROUND: begin
-                // Process d from bit 255 to bit 0.
-                core_state_r <= C_START_SQ;
-            end
-
-            C_START_SQ: begin
-                // m = m*m mod N: operands survive while m becomes acc.
-                a_r             <= m;
-                b_r             <= m;
-                m               <= 256'b0;
-                mul_by_y_r      <= 1'b0;
-                mul_seq_r       <= 9'h001;
-                core_byte_seq_r <= 6'h01;
-                add_carry_m_r   <= 1'b0;
-                add_carry_b_r   <= 1'b0;
-                ge_m_r          <= 1'b1;
-                ge_b_r          <= 1'b1;
-                need_sub_m_r    <= 1'b0;
-                need_sub_b_r    <= 1'b0;
-                lane_b_r        <= 1'b0;
-                core_state_r    <= C_MUL_ADD;
-            end
-
-            C_START_MUL: begin
-                // m = m*y mod N; y stays in ndy_r[255:0].
-                a_r             <= m;
-                b_r             <= ndy_r[255:0];
-                m               <= 256'b0;
-                mul_by_y_r      <= 1'b1;
-                mul_seq_r       <= 9'h001;
-                core_byte_seq_r <= 6'h01;
-                add_carry_m_r   <= 1'b0;
-                add_carry_b_r   <= 1'b0;
-                ge_m_r          <= 1'b1;
-                ge_b_r          <= 1'b1;
-                need_sub_m_r    <= 1'b0;
-                need_sub_b_r    <= 1'b0;
-                lane_b_r        <= 1'b0;
-                core_state_r    <= C_MUL_ADD;
-            end
-
-            C_MUL_ADD: begin
-                // One shared adder: m lane first, B lane second.
-                if (!lane_b_r) begin
-                    m <= {byte_sum[7:0], m[255:8]};
-                    add_carry_m_r <= byte_sum[8];
-                    ge_m_r <= ge_lane_next;
-                    lane_b_r <= 1'b1;
-                end else begin
-                    b_r <= {byte_sum[7:0], b_r[255:8]};
-                    ndy_r[767:512] <=
-                        {ndy_r[519:512], ndy_r[767:520]};
-                    add_carry_b_r <= byte_sum[8];
-                    ge_b_r <= ge_lane_next;
-                    lane_b_r <= 1'b0;
-
-                    if (core_byte_seq_r == C_BYTE_LAST) begin
-                        need_sub_m_r <= add_carry_m_r | ge_m_r;
-                        need_sub_b_r <= byte_sum[8] | ge_lane_next;
-                        core_byte_seq_r <= 6'h01;
-
-                        if ((add_carry_m_r | ge_m_r) ||
-                            (byte_sum[8] | ge_lane_next)) begin
-                            sub_carry_m_r <= 1'b1;
-                            sub_carry_b_r <= 1'b1;
-                            core_state_r <= C_MUL_SUB;
-                        end else if (mul_seq_r == C_BIT_LAST) begin
-                            core_state_r <= C_MUL_DONE;
-                        end else begin
-                            a_r <= {1'b0, a_r[255:1]};
-                            mul_seq_r <= core_lfsr9_next(mul_seq_r);
-                            add_carry_m_r <= 1'b0;
-                            add_carry_b_r <= 1'b0;
-                            ge_m_r <= 1'b1;
-                            ge_b_r <= 1'b1;
-                        end
-                    end else begin
-                        core_byte_seq_r <=
-                            core_lfsr6_next(core_byte_seq_r);
-                    end
-                end
-            end
-
-            C_MUL_SUB: begin
-                // The same adder performs m-N and B-N in two phases.
-                if (!lane_b_r) begin
-                    m <= need_sub_m_r ?
-                         {byte_sum[7:0], m[255:8]} :
-                         {m[7:0], m[255:8]};
-                    if (need_sub_m_r)
-                        sub_carry_m_r <= byte_sum[8];
-                    lane_b_r <= 1'b1;
-                end else begin
-                    b_r <= need_sub_b_r ?
-                           {byte_sum[7:0], b_r[255:8]} :
-                           {b_r[7:0], b_r[255:8]};
-                    ndy_r[767:512] <=
-                        {ndy_r[519:512], ndy_r[767:520]};
-                    if (need_sub_b_r)
-                        sub_carry_b_r <= byte_sum[8];
-                    lane_b_r <= 1'b0;
-
-                    if (core_byte_seq_r == C_BYTE_LAST) begin
-                        core_byte_seq_r <= 6'h01;
-                        if (mul_seq_r == C_BIT_LAST) begin
-                            core_state_r <= C_MUL_DONE;
-                        end else begin
-                            a_r <= {1'b0, a_r[255:1]};
-                            mul_seq_r <= core_lfsr9_next(mul_seq_r);
-                            add_carry_m_r <= 1'b0;
-                            add_carry_b_r <= 1'b0;
-                            ge_m_r <= 1'b1;
-                            ge_b_r <= 1'b1;
-                            need_sub_m_r <= 1'b0;
-                            need_sub_b_r <= 1'b0;
-                            core_state_r <= C_MUL_ADD;
-                        end
-                    end else begin
-                        core_byte_seq_r <=
-                            core_lfsr6_next(core_byte_seq_r);
-                    end
-                end
-            end
-
-            C_MUL_DONE: begin
-                if (!mul_by_y_r && ndy_r[511]) begin
-                    // Square finished and current exponent bit is one.
-                    core_state_r <= C_START_MUL;
-                end else if (round_seq_r == C_BIT_LAST) begin
-                    core_state_r <= C_DONE;
-                end else begin
-                    // Consume the current MSB of d in the existing buffer.
-                    ndy_r[511:256] <= {ndy_r[510:256], 1'b0};
-                    round_seq_r <= core_lfsr9_next(round_seq_r);
-                    core_state_r <= C_ROUND;
-                end
-            end
-
-            C_DONE: begin
-                core_state_r <= C_HOLD;
-            end
-
-            C_HOLD: begin
-                if (!finish_r)
-                    core_state_r <= C_IDLE;
-            end
-
-            default: core_state_r <= C_IDLE;
-        endcase
     end
 end
 
 endmodule
+
