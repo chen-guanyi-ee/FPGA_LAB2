@@ -1,6 +1,6 @@
 # FPGA_LAB2
 
-2026/10/03 陳冠亦
+##2026/10/03 陳冠亦
 
 目前完成 AXI UART Lite wrapper 初版：
 
@@ -11,7 +11,7 @@
 
 RSA256 core 計算部分仍待整合。
 
-## 2026/10/03 更新
+## 2026/10/04 陳冠亦
 
 - RSA256 計算已整合至 `Rsa256Wrapper.sv`
 - 使用 MSB-first square-and-multiply 與單一共用 8-bit adder
