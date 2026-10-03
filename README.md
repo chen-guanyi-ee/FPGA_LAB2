@@ -19,3 +19,10 @@ RSA256 core 計算部分仍待整合。
 - UART 到 RSA 再到 UART 的完整模擬已通過
 - Nexys A7-100T routed utilization：544 slices、1604 LUT、1700 FF
 - 100 MHz timing passed，WNS 為 +1.137 ns
+
+## 2026/10/04 陳冠亦
+
+- 降低stage數量
+- 不使用axi b response
+- 改為m*m first
+- slice = 389
