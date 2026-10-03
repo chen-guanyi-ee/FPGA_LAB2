@@ -9,15 +9,19 @@ module tb;
     localparam logic [255:0] Y = 256'hC6B662ECB173C53CC7BB4212057F9C0BA283E000B98C9DCF5FEAEE7D6C933DFB;
     localparam logic [255:0] M = 256'h005468652076616C7565206F662050492069733A0A332E313431353932363533;
 
-    logic clk, rst, rx, tx, finish_calc, finish_r;
+    logic clk, rst, rx, tx;
+    logic [767:0] received_ndy;
 
     Rsa256Wrapper dut (
-        .i_clk(clk), .i_rst(rst), .rx(rx), .finish_calc(finish_calc),
-        .tx(tx), .finish_r(finish_r)
+        .i_clk(clk), .i_rst(rst), .rx(rx), .tx(tx)
     );
 
     initial clk = 1'b0;
     always #(CLK_PERIOD/2) clk = ~clk;
+
+    // The integrated core reuses/rotates ndy_r immediately after RX.
+    always @(posedge dut.finish_r)
+        received_ndy = dut.ndy_r;
 
     task automatic uart_send_byte(input logic [7:0] data);
         rx = 1'b0;
@@ -52,7 +56,6 @@ module tb;
 
         rx = 1'b1;
         rst = 1'b1;
-        finish_calc = 1'b0;
         #(10*CLK_PERIOD);
         @(negedge clk);
         rst = 1'b0;
@@ -65,7 +68,7 @@ module tb;
 
         fork
             begin
-                wait (finish_r === 1'b1);
+                wait (dut.finish_r === 1'b1);
             end
             begin
                 #(2_000_000);
@@ -75,17 +78,11 @@ module tb;
         disable fork;
 
         #1ns;
-        if (dut.ndy_r !== {N, D, Y})
-            $fatal(1, "RX data/order mismatch\nexpected=%h\nactual  =%h", {N,D,Y}, dut.ndy_r);
+        if (received_ndy !== {N, D, Y})
+            $fatal(1, "RX data/order mismatch\nexpected=%h\nactual  =%h", {N,D,Y}, received_ndy);
         if (dut.uart.rx_read_count != 96)
             $fatal(1, "Expected 96 RX FIFO reads, got %0d", dut.uart.rx_read_count);
 
-        // There is no core yet, so the testbench supplies m.
-        force dut.m = M;
-        @(negedge clk);
-        finish_calc = 1'b1;
-        @(negedge clk);
-        finish_calc = 1'b0;
 
         // Lab behavior: skip the leading 00 and send m[247:0] (31 bytes).
         for (int byte_idx = 30; byte_idx >= 0; byte_idx--) begin
@@ -99,14 +96,12 @@ module tb;
         wait (dut.state_r == 4'd9);
         if (dut.uart.tx_write_count != 31)
             $fatal(1, "Expected 31 TX FIFO writes, got %0d", dut.uart.tx_write_count);
-
-        release dut.m;
         $display("PASS: 96-byte RX, N/d/y order, status checks, and 31-byte TX verified.");
         $finish;
     end
 
     initial begin
-        #(30_000_000);
+        #(200_000_000);
         $fatal(1, "Simulation timeout");
     end
 endmodule

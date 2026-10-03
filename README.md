@@ -10,3 +10,12 @@
 - 提供 UART/AXI Lite wrapper testbench
 
 RSA256 core 計算部分仍待整合。
+
+## 2026/10/03 更新
+
+- RSA256 計算已整合至 `Rsa256Wrapper.sv`
+- 使用 MSB-first square-and-multiply 與單一共用 8-bit adder
+- 直接重用 N、d、y 接收 buffer，輸出 31-byte plaintext
+- UART 到 RSA 再到 UART 的完整模擬已通過
+- Nexys A7-100T routed utilization：544 slices、1604 LUT、1700 FF
+- 100 MHz timing passed，WNS 為 +1.137 ns
