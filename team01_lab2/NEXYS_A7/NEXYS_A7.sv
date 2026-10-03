@@ -91,11 +91,15 @@ module NEXYS_A7(
     output QSPI_CSN
     );
 
+    wire finish_read;
+
     Rsa256Wrapper Rsa256Wrapper0(
         .i_clk(CLK100MHZ),
         .i_rst(BTNC),
         .rx(UART_TXD_IN),
-        .tx(UART_RXD_OUT)
+        .finish_calc(1'b0),
+        .tx(UART_RXD_OUT),
+        .finish_r(finish_read)
     );
 
 endmodule

@@ -1,16 +1,12 @@
 # FPGA_LAB2
-<p>
-AXI 陳冠亦 負責
 
-Core algorithm -> 已經有open source 下載"soft macro " 不能是hard macro 。 譬如說下載了一個y*2^256 mod N mod1.
+2026/10/03 陳冠亦
 
-top.sv  -> module mod1(clk, output); endmodule
+目前完成 AXI UART Lite wrapper 初版：
 
-不要連axi 一起implement 找slice最小且能用的 注意測資testbence.sv要跑過
+- UART 接收 N、d、y，共 96 bytes
+- 使用 LFSR 計算 RX/TX byte 數量
+- 計算完成後傳回 31-byte plaintext
+- 提供 UART/AXI Lite wrapper testbench
 
-uart -> axi 格式 ->陳冠亦->soft macro指定的格式->你們優化
-
-兩邊都好之後再一起impplement。
-
-
-</p>
+RSA256 core 計算部分仍待整合。
