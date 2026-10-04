@@ -30,5 +30,6 @@ RSA256 core 計算部分仍待整合。
 - ## 2026/10/05 陳冠亦
 
 - 使用sram
-- slice=94
+- 取消shifter/lfsr
+- slice=101
 
