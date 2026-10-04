@@ -7,12 +7,7 @@ module Rsa256Wrapper (
     output logic tx
 );
 
-localparam logic [3:0] RX_BASE     = 4'h0;
-localparam logic [3:0] TX_BASE     = 4'h4;
-localparam logic [3:0] STATUS_BASE = 4'h8;
-
-localparam int RX_OK_BIT   = 0;
-localparam int TX_FULL_BIT = 3;
+localparam int UART_CLKS_PER_BIT = 868; // 100 MHz / 115200 baud
 
 localparam logic [2:0] S_STATUS_ADDR = 3'd0;
 localparam logic [2:0] S_STATUS_DATA = 3'd1;
@@ -64,7 +59,6 @@ logic carry_m_r, carry_b_r;
 logic ge_m_r, ge_b_r;
 logic lane_b_r;
 logic a_bit_r;
-logic aw_done_r, w_done_r;
 
 wire [4:0] core_addr = byte_count_r[4:0];
 wire [7:0] n_byte = n_mem[core_addr];
@@ -95,55 +89,97 @@ wire ge_lane_next = (byte_sum[7:0] > n_byte) ? 1'b1 :
                     (lane_b_r ? ge_b_r : ge_m_r);
 
 /********************************************************
-    AXI UART Lite
+    Minimal 115200-8N1 UART
+
+    The lab protocol is strictly stop-and-wait, so a one-byte holding
+    register is sufficient.  This replaces the AXI4-Lite channels,
+    address decoder, response logic and both UART-Lite FIFOs.
 **********************************************************/
-logic [3:0]  s_axi_awaddr;
-logic        s_axi_awvalid;
-logic        s_axi_awready;
-logic [31:0] s_axi_wdata;
-logic        s_axi_wvalid;
-logic        s_axi_wready;
-logic [3:0]  s_axi_araddr;
-logic        s_axi_arvalid;
-logic        s_axi_arready;
-logic [31:0] s_axi_rdata;
-logic        s_axi_rvalid;
-logic        s_axi_rready;
+logic rx_meta_r, rx_sync_r;
+logic [9:0] rx_clk_count_r, tx_clk_count_r;
+logic [7:0] rx_shift_r, rx_data_r, tx_shift_r;
+logic [3:0] rx_bit_r, tx_bit_r;
+logic rx_busy_r, rx_valid_r, tx_busy_r;
 
-axi_uartlite_0 uart (
-    .s_axi_aclk(i_clk),
-    .s_axi_aresetn(!i_rst),
-    .s_axi_awaddr(s_axi_awaddr),
-    .s_axi_awvalid(s_axi_awvalid),
-    .s_axi_awready(s_axi_awready),
-    .s_axi_wdata(s_axi_wdata),
-    .s_axi_wstrb(4'b1111),
-    .s_axi_wvalid(s_axi_wvalid),
-    .s_axi_wready(s_axi_wready),
-    .s_axi_bresp(),
-    .s_axi_bvalid(),
-    .s_axi_bready(1'b1),
-    .s_axi_araddr(s_axi_araddr),
-    .s_axi_arvalid(s_axi_arvalid),
-    .s_axi_arready(s_axi_arready),
-    .s_axi_rdata(s_axi_rdata),
-    .s_axi_rresp(),
-    .s_axi_rvalid(s_axi_rvalid),
-    .s_axi_rready(s_axi_rready),
-    .rx(rx),
-    .tx(tx)
-);
+wire rx_take  = (state_r == S_RX_DATA_HOLD) && !mul_by_y_r && rx_valid_r;
+wire tx_start = (state_r == S_TX_DATA) && !tx_busy_r;
 
-assign s_axi_awaddr  = TX_BASE;
-assign s_axi_awvalid = (state_r == S_TX_DATA) && !aw_done_r;
-assign s_axi_wdata   = {24'b0, tx_byte};
-assign s_axi_wvalid  = (state_r == S_TX_DATA) && !w_done_r;
+always_ff @(posedge i_clk or posedge i_rst) begin
+    if (i_rst) begin
+        rx_meta_r      <= 1'b1;
+        rx_sync_r      <= 1'b1;
+        rx_clk_count_r <= 10'd0;
+        rx_shift_r     <= 8'd0;
+        rx_data_r      <= 8'd0;
+        rx_bit_r       <= 4'd0;
+        rx_busy_r      <= 1'b0;
+        rx_valid_r     <= 1'b0;
+    end else begin
+        rx_meta_r <= rx;
+        rx_sync_r <= rx_meta_r;
+        if (rx_take)
+            rx_valid_r <= 1'b0;
 
-assign s_axi_araddr  = (state_r == S_RX_ADDR) ? RX_BASE : STATUS_BASE;
-assign s_axi_arvalid = (state_r == S_STATUS_ADDR) ||
-                       (state_r == S_RX_ADDR);
-assign s_axi_rready  = (state_r == S_STATUS_DATA) ||
-                       ((state_r == S_RX_DATA_HOLD) && !mul_by_y_r);
+        if (!rx_busy_r) begin
+            if (!rx_sync_r && !rx_valid_r) begin
+                rx_busy_r      <= 1'b1;
+                rx_clk_count_r <= UART_CLKS_PER_BIT/2 - 1;
+                rx_bit_r       <= 4'd0;
+            end
+        end else if (rx_clk_count_r != 0) begin
+            rx_clk_count_r <= rx_clk_count_r - 1'b1;
+        end else if (rx_bit_r == 0) begin
+            // Recheck the start bit at its center.
+            if (rx_sync_r) begin
+                rx_busy_r <= 1'b0;
+            end else begin
+                rx_bit_r       <= 4'd1;
+                rx_clk_count_r <= UART_CLKS_PER_BIT - 1;
+            end
+        end else if (rx_bit_r <= 8) begin
+            rx_shift_r[rx_bit_r-1'b1] <= rx_sync_r;
+            rx_bit_r                  <= rx_bit_r + 1'b1;
+            rx_clk_count_r            <= UART_CLKS_PER_BIT - 1;
+        end else begin
+            rx_busy_r <= 1'b0;
+            if (rx_sync_r) begin
+                rx_data_r  <= rx_shift_r;
+                rx_valid_r <= 1'b1;
+            end
+        end
+    end
+end
+
+always_ff @(posedge i_clk or posedge i_rst) begin
+    if (i_rst) begin
+        tx             <= 1'b1;
+        tx_clk_count_r <= 10'd0;
+        tx_shift_r     <= 8'd0;
+        tx_bit_r       <= 4'd0;
+        tx_busy_r      <= 1'b0;
+    end else if (!tx_busy_r) begin
+        tx <= 1'b1;
+        if (tx_start) begin
+            tx             <= 1'b0;
+            tx_shift_r     <= tx_byte;
+            tx_bit_r       <= 4'd0;
+            tx_clk_count_r <= UART_CLKS_PER_BIT - 1;
+            tx_busy_r      <= 1'b1;
+        end
+    end else if (tx_clk_count_r != 0) begin
+        tx_clk_count_r <= tx_clk_count_r - 1'b1;
+    end else if (tx_bit_r < 8) begin
+        tx             <= tx_shift_r[tx_bit_r];
+        tx_bit_r       <= tx_bit_r + 1'b1;
+        tx_clk_count_r <= UART_CLKS_PER_BIT - 1;
+    end else if (tx_bit_r == 8) begin
+        tx             <= 1'b1;
+        tx_bit_r       <= 4'd9;
+        tx_clk_count_r <= UART_CLKS_PER_BIT - 1;
+    end else begin
+        tx_busy_r      <= 1'b0;
+    end
+end
 
 /********************************************************
     Single write port for each byte memory, with no reset.
@@ -167,20 +203,20 @@ always_comb begin
     if (!i_rst) begin
         case (state_r)
             S_RX_DATA_HOLD: begin
-                if (!mul_by_y_r && s_axi_rvalid) begin
+                if (rx_take) begin
                     mem_waddr = 5'd31 - byte_count_r[4:0];
                     case (byte_count_r[6:5])
                         2'b00: begin
                             n_we = 1'b1;
-                            n_wdata = s_axi_rdata[7:0];
+                            n_wdata = rx_data_r;
                         end
                         2'b01: begin
                             d_we = 1'b1;
-                            d_wdata = s_axi_rdata[7:0];
+                            d_wdata = rx_data_r;
                         end
                         default: begin
                             y_we = 1'b1;
-                            y_wdata = s_axi_rdata[7:0];
+                            y_wdata = rx_data_r;
                         end
                     endcase
                 end
@@ -254,37 +290,25 @@ always_ff @(posedge i_clk or posedge i_rst) begin
         ge_b_r        <= 1'b1;
         lane_b_r      <= 1'b0;
         a_bit_r       <= 1'b0;
-        aw_done_r     <= 1'b0;
-        w_done_r      <= 1'b0;
     end else begin
         case (state_r)
             S_STATUS_ADDR: begin
-                if (s_axi_arready)
-                    state_r <= S_STATUS_DATA;
+                state_r <= S_STATUS_DATA;
             end
 
             S_STATUS_DATA: begin
-                if (s_axi_rvalid) begin
-                    if (!mul_by_y_r) begin
-                        state_r <= s_axi_rdata[RX_OK_BIT] ?
-                                   S_RX_ADDR : S_STATUS_ADDR;
-                    end else if (s_axi_rdata[TX_FULL_BIT]) begin
-                        state_r <= S_STATUS_ADDR;
-                    end else begin
-                        aw_done_r <= 1'b0;
-                        w_done_r  <= 1'b0;
-                        state_r   <= S_TX_DATA;
-                    end
-                end
+                if (!mul_by_y_r)
+                    state_r <= rx_valid_r ? S_RX_ADDR : S_STATUS_ADDR;
+                else
+                    state_r <= tx_busy_r ? S_STATUS_ADDR : S_TX_DATA;
             end
 
             S_RX_ADDR: begin
-                if (s_axi_arready)
-                    state_r <= S_RX_DATA_HOLD;
+                state_r <= S_RX_DATA_HOLD;
             end
 
             S_RX_DATA_HOLD: begin
-                if (!mul_by_y_r && s_axi_rvalid) begin
+                if (rx_take) begin
                     if (byte_count_r == 7'd95) begin
                         byte_count_r <= 7'd0;
                         round_bit_r  <= 8'd0;
@@ -405,15 +429,13 @@ always_ff @(posedge i_clk or posedge i_rst) begin
             end
 
             S_TX_DATA: begin
-                if (s_axi_awready)
-                    aw_done_r <= 1'b1;
-                if (s_axi_wready)
-                    w_done_r <= 1'b1;
-
-                if ((aw_done_r || s_axi_awready) &&
-                    (w_done_r || s_axi_wready)) begin
+                if (tx_start) begin
                     if (byte_count_r == 7'd30) begin
-                        state_r <= S_RX_DATA_HOLD;
+                        // N and d stay resident; the next transaction starts
+                        // at byte 64 and overwrites only the ciphertext.
+                        byte_count_r <= 7'd64;
+                        mul_by_y_r   <= 1'b0;
+                        state_r      <= S_STATUS_ADDR;
                     end else begin
                         byte_count_r <= byte_count_r + 1'b1;
                         state_r <= S_STATUS_ADDR;
