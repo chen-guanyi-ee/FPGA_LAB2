@@ -26,3 +26,9 @@ RSA256 core 計算部分仍待整合。
 - 不使用axi b response
 - 改為m*m first
 - slice = 389
+
+- ## 2026/10/05 陳冠亦
+
+- 使用sram
+- slice=94
+
