@@ -30,8 +30,6 @@ RSA256 core 計算部分仍待整合。
 - ## 2026/10/05 陳冠亦
 
 - 使用sram
-- 使用策略：
-- Synthesis：AreaOptimized_high
-- Implementation opt_design：ExploreArea
-- slice = 83
+- 去除axi格式
+- slice =73
 
