@@ -31,5 +31,5 @@ RSA256 core 計算部分仍待整合。
 
 - 使用sram
 - 去除axi格式
-- slice = 77
+- slice = 67
 
