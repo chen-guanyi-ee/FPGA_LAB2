@@ -9,14 +9,11 @@ module Rsa256Wrapper (
 
 localparam int UART_CLKS_PER_BIT = 868; // 100 MHz / 115200 baud
 
-localparam logic [2:0] S_STATUS_ADDR = 3'd0;
-localparam logic [2:0] S_STATUS_DATA = 3'd1;
-localparam logic [2:0] S_RX_ADDR     = 3'd2;
-localparam logic [2:0] S_RX_DATA_HOLD= 3'd3;
-localparam logic [2:0] S_MUL_LOAD    = 3'd4;
-localparam logic [2:0] S_MUL_ADD     = 3'd5;
-localparam logic [2:0] S_MUL_SUB     = 3'd6;
-localparam logic [2:0] S_TX_DATA     = 3'd7;
+localparam logic [2:0] S_RX_WAIT  = 3'd0;
+localparam logic [2:0] S_MUL_LOAD = 3'd1;
+localparam logic [2:0] S_MUL_ADD  = 3'd2;
+localparam logic [2:0] S_MUL_SUB  = 3'd3;
+localparam logic [2:0] S_TX_DATA  = 3'd4;
 
 /********************************************************
     Byte memories
@@ -96,88 +93,90 @@ wire ge_lane_next = (byte_sum[7:0] > n_byte) ? 1'b1 :
     address decoder, response logic and both UART-Lite FIFOs.
 **********************************************************/
 logic rx_meta_r, rx_sync_r;
-logic [9:0] rx_clk_count_r, tx_clk_count_r;
+logic [9:0] uart_clk_count_r;
 logic [7:0] rx_shift_r, rx_data_r, tx_shift_r;
 logic [3:0] rx_bit_r, tx_bit_r;
 logic rx_busy_r, rx_valid_r, tx_busy_r;
 
-wire rx_take  = (state_r == S_RX_DATA_HOLD) && !mul_by_y_r && rx_valid_r;
+wire rx_take  = (state_r == S_RX_WAIT) && !mul_by_y_r && rx_valid_r;
 wire tx_start = (state_r == S_TX_DATA) && !tx_busy_r;
 
+// RX and TX are mutually exclusive in this stop-and-wait protocol, so the
+// two serializers share one baud counter and one decrement/carry chain.
 always_ff @(posedge i_clk or posedge i_rst) begin
     if (i_rst) begin
         rx_meta_r      <= 1'b1;
         rx_sync_r      <= 1'b1;
-        rx_clk_count_r <= 10'd0;
+        uart_clk_count_r <= 10'd0;
         rx_shift_r     <= 8'd0;
         rx_data_r      <= 8'd0;
         rx_bit_r       <= 4'd0;
         rx_busy_r      <= 1'b0;
         rx_valid_r     <= 1'b0;
-    end else begin
-        rx_meta_r <= rx;
-        rx_sync_r <= rx_meta_r;
-        if (rx_take)
-            rx_valid_r <= 1'b0;
-
-        if (!rx_busy_r) begin
-            if (!rx_sync_r && !rx_valid_r) begin
-                rx_busy_r      <= 1'b1;
-                rx_clk_count_r <= UART_CLKS_PER_BIT/2 - 1;
-                rx_bit_r       <= 4'd0;
-            end
-        end else if (rx_clk_count_r != 0) begin
-            rx_clk_count_r <= rx_clk_count_r - 1'b1;
-        end else if (rx_bit_r == 0) begin
-            // Recheck the start bit at its center.
-            if (rx_sync_r) begin
-                rx_busy_r <= 1'b0;
-            end else begin
-                rx_bit_r       <= 4'd1;
-                rx_clk_count_r <= UART_CLKS_PER_BIT - 1;
-            end
-        end else if (rx_bit_r <= 8) begin
-            rx_shift_r[rx_bit_r-1'b1] <= rx_sync_r;
-            rx_bit_r                  <= rx_bit_r + 1'b1;
-            rx_clk_count_r            <= UART_CLKS_PER_BIT - 1;
-        end else begin
-            rx_busy_r <= 1'b0;
-            if (rx_sync_r) begin
-                rx_data_r  <= rx_shift_r;
-                rx_valid_r <= 1'b1;
-            end
-        end
-    end
-end
-
-always_ff @(posedge i_clk or posedge i_rst) begin
-    if (i_rst) begin
         tx             <= 1'b1;
-        tx_clk_count_r <= 10'd0;
         tx_shift_r     <= 8'd0;
         tx_bit_r       <= 4'd0;
         tx_busy_r      <= 1'b0;
-    end else if (!tx_busy_r) begin
-        tx <= 1'b1;
-        if (tx_start) begin
-            tx             <= 1'b0;
-            tx_shift_r     <= tx_byte;
-            tx_bit_r       <= 4'd0;
-            tx_clk_count_r <= UART_CLKS_PER_BIT - 1;
-            tx_busy_r      <= 1'b1;
-        end
-    end else if (tx_clk_count_r != 0) begin
-        tx_clk_count_r <= tx_clk_count_r - 1'b1;
-    end else if (tx_bit_r < 8) begin
-        tx             <= tx_shift_r[tx_bit_r];
-        tx_bit_r       <= tx_bit_r + 1'b1;
-        tx_clk_count_r <= UART_CLKS_PER_BIT - 1;
-    end else if (tx_bit_r == 8) begin
-        tx             <= 1'b1;
-        tx_bit_r       <= 4'd9;
-        tx_clk_count_r <= UART_CLKS_PER_BIT - 1;
     end else begin
-        tx_busy_r      <= 1'b0;
+        rx_meta_r <= rx;
+        rx_sync_r <= rx_meta_r;
+
+        if (rx_take)
+            rx_valid_r <= 1'b0;
+
+        if (rx_busy_r) begin
+            if (uart_clk_count_r != 0) begin
+                uart_clk_count_r <= uart_clk_count_r - 1'b1;
+            end else if (rx_bit_r == 0) begin
+                // Recheck the start bit at its center.
+                if (rx_sync_r) begin
+                    rx_busy_r <= 1'b0;
+                end else begin
+                    rx_bit_r          <= 4'd1;
+                    uart_clk_count_r  <= UART_CLKS_PER_BIT - 1;
+                end
+            end else if (rx_bit_r <= 8) begin
+                rx_shift_r[rx_bit_r-1'b1] <= rx_sync_r;
+                rx_bit_r                  <= rx_bit_r + 1'b1;
+                uart_clk_count_r          <= UART_CLKS_PER_BIT - 1;
+            end else begin
+                rx_busy_r <= 1'b0;
+                if (rx_sync_r) begin
+                    rx_data_r  <= rx_shift_r;
+                    rx_valid_r <= 1'b1;
+                end
+            end
+        end else if (tx_busy_r) begin
+            if (uart_clk_count_r != 0) begin
+                uart_clk_count_r <= uart_clk_count_r - 1'b1;
+            end else if (tx_bit_r < 8) begin
+                tx                    <= tx_shift_r[tx_bit_r];
+                tx_bit_r             <= tx_bit_r + 1'b1;
+                uart_clk_count_r     <= UART_CLKS_PER_BIT - 1;
+            end else if (tx_bit_r == 8) begin
+                tx                    <= 1'b1;
+                tx_bit_r             <= 4'd9;
+                uart_clk_count_r     <= UART_CLKS_PER_BIT - 1;
+            end else begin
+                tx_busy_r <= 1'b0;
+            end
+        end else if (tx_start) begin
+            tx                    <= 1'b0;
+            tx_shift_r            <= tx_byte;
+            tx_bit_r              <= 4'd0;
+            uart_clk_count_r      <= UART_CLKS_PER_BIT - 1;
+            tx_busy_r             <= 1'b1;
+        end else begin
+            tx <= 1'b1;
+            // Ignore RX activity while the RSA core or transmitter owns the
+            // datapath. This also proves the shared counter has one owner.
+            if ((state_r == S_RX_WAIT) && !mul_by_y_r &&
+                !rx_sync_r && !rx_valid_r) begin
+                rx_busy_r          <= 1'b1;
+                uart_clk_count_r  <= UART_CLKS_PER_BIT/2 - 1;
+                rx_bit_r       <= 4'd0;
+            end
+        end
     end
 end
 
@@ -202,7 +201,7 @@ always_comb begin
 
     if (!i_rst) begin
         case (state_r)
-            S_RX_DATA_HOLD: begin
+            S_RX_WAIT: begin
                 if (rx_take) begin
                     mem_waddr = 5'd31 - byte_count_r[4:0];
                     case (byte_count_r[6:5])
@@ -278,7 +277,7 @@ end
 **********************************************************/
 always_ff @(posedge i_clk or posedge i_rst) begin
     if (i_rst) begin
-        state_r       <= S_STATUS_ADDR;
+        state_r       <= S_RX_WAIT;
         byte_count_r  <= 7'd0;
         mul_bit_r     <= 8'd0;
         round_bit_r   <= 8'd0;
@@ -292,22 +291,7 @@ always_ff @(posedge i_clk or posedge i_rst) begin
         a_bit_r       <= 1'b0;
     end else begin
         case (state_r)
-            S_STATUS_ADDR: begin
-                state_r <= S_STATUS_DATA;
-            end
-
-            S_STATUS_DATA: begin
-                if (!mul_by_y_r)
-                    state_r <= rx_valid_r ? S_RX_ADDR : S_STATUS_ADDR;
-                else
-                    state_r <= tx_busy_r ? S_STATUS_ADDR : S_TX_DATA;
-            end
-
-            S_RX_ADDR: begin
-                state_r <= S_RX_DATA_HOLD;
-            end
-
-            S_RX_DATA_HOLD: begin
+            S_RX_WAIT: begin
                 if (rx_take) begin
                     if (byte_count_r == 7'd95) begin
                         byte_count_r <= 7'd0;
@@ -318,7 +302,6 @@ always_ff @(posedge i_clk or posedge i_rst) begin
                         state_r      <= S_MUL_LOAD;
                     end else begin
                         byte_count_r <= byte_count_r + 1'b1;
-                        state_r <= S_STATUS_ADDR;
                     end
                 end
             end
@@ -377,7 +360,8 @@ always_ff @(posedge i_clk or posedge i_rst) begin
                             state_r    <= S_MUL_LOAD;
                         end else if (round_bit_r == 8'hff) begin
                             mul_by_y_r <= 1'b1;
-                            state_r    <= S_STATUS_ADDR;
+                            byte_count_r <= 7'd0;
+                            state_r    <= S_TX_DATA;
                         end else begin
                             round_bit_r <= round_bit_r + 1'b1;
                             mul_by_y_r  <= 1'b0;
@@ -417,7 +401,8 @@ always_ff @(posedge i_clk or posedge i_rst) begin
                             state_r    <= S_MUL_LOAD;
                         end else if (round_bit_r == 8'hff) begin
                             mul_by_y_r <= 1'b1;
-                            state_r    <= S_STATUS_ADDR;
+                            byte_count_r <= 7'd0;
+                            state_r    <= S_TX_DATA;
                         end else begin
                             round_bit_r <= round_bit_r + 1'b1;
                             mul_by_y_r  <= 1'b0;
@@ -435,19 +420,21 @@ always_ff @(posedge i_clk or posedge i_rst) begin
                         // at byte 64 and overwrites only the ciphertext.
                         byte_count_r <= 7'd64;
                         mul_by_y_r   <= 1'b0;
-                        state_r      <= S_STATUS_ADDR;
+                        state_r      <= S_RX_WAIT;
                     end else begin
                         byte_count_r <= byte_count_r + 1'b1;
-                        state_r <= S_STATUS_ADDR;
                     end
                 end
             end
 
-            default: state_r <= S_STATUS_ADDR;
+            default: state_r <= S_RX_WAIT;
         endcase
     end
 end
 
 endmodule
+
+
+
 
 
